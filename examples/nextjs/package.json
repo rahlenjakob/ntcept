@@ -1,0 +1,23 @@
+{
+  "name": "ntcept-example",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "next dev -p 3210",
+    "build": "next build",
+    "start": "next start -p 3210"
+  },
+  "dependencies": {
+    "next": "^16.3.5",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "pg": "^8.13.1",
+    "redis": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/react": "19.0.2",
+    "typescript": "5.7.2",
+    "@types/pg": "^8.11.10"
+  }
+}

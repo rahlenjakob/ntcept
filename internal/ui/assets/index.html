@@ -1,0 +1,409 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ntcept</title>
+<style>
+:root{
+  --bg:#fbfbfa; --panel:#fff; --line:#e4e2dd; --ink:#1c1b19; --dim:#6b6862;
+  --accent:#2f6f4f; --warn:#9a6a00; --bad:#b0402f; --sel:#eef2ef;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+@media(prefers-color-scheme:dark){:root{
+  --bg:#141413; --panel:#1b1b19; --line:#2c2b28; --ink:#eceae5; --dim:#8b877f;
+  --accent:#7fbf9a; --warn:#d9a441; --bad:#e08167; --sel:#23251f;
+}}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.5 var(--mono);display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
+.brand{font-weight:600;letter-spacing:.06em}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--accent);display:inline-block;margin-right:6px}
+.dot.off{background:var(--bad)}
+.meta{color:var(--dim);font-size:12px}
+input[type=search]{flex:1;min-width:180px;padding:5px 9px;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--ink);font:inherit}
+button{padding:4px 10px;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--ink);font:inherit;cursor:pointer}
+button:hover{border-color:var(--dim)}
+button.on{background:var(--sel);border-color:var(--accent);color:var(--accent)}
+main{flex:1;display:flex;min-height:0}
+#list{width:46%;min-width:320px;overflow:auto;border-right:1px solid var(--line)}
+#detail{flex:1;overflow:auto;padding:14px 16px}
+table{width:100%;border-collapse:collapse}
+tr.flow{cursor:pointer;border-bottom:1px solid var(--line)}
+tr.flow:hover{background:var(--sel)}
+tr.flow.sel{background:var(--sel);box-shadow:inset 2px 0 0 var(--accent)}
+td{padding:4px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}
+td.id{color:var(--dim);width:44px}
+td.t{color:var(--dim);width:82px}
+td.m{width:54px;font-weight:600}
+td.s{width:44px}
+td.ms{width:62px;text-align:right;color:var(--dim)}
+td.u{max-width:0}
+.ok{color:var(--accent)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+.tag{display:inline-block;padding:0 5px;border:1px solid var(--line);border-radius:3px;font-size:10px;color:var(--dim);margin-left:5px;vertical-align:1px}
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);margin:18px 0 6px;font-weight:600}
+h2:first-child{margin-top:0}
+pre{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px;overflow:auto;max-height:460px;white-space:pre-wrap;word-break:break-word;margin:0;font-size:12px}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:1px 14px;margin:0}
+dt{color:var(--dim)} dd{margin:0;word-break:break-all}
+.empty{color:var(--dim);padding:40px 16px;text-align:center}
+.msg{border-bottom:1px solid var(--line);padding:4px 0;display:flex;gap:8px}
+.msg .dir{color:var(--dim);width:14px;flex:none}
+.msg .body{word-break:break-all;white-space:pre-wrap}
+.secret{color:var(--warn)}
+.held{background:var(--warn);color:#141413;padding:7px 14px;display:flex;gap:10px;align-items:center;font-weight:600}
+.held button{background:#141413;color:#fff;border-color:#141413;font-weight:400}
+[hidden]{display:none!important}
+#editor{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:24px;z-index:10}
+#editor .box{background:var(--bg);border:1px solid var(--line);border-radius:10px;width:min(860px,100%);max-height:100%;display:flex;flex-direction:column;overflow:hidden}
+#editor header{border-bottom:1px solid var(--line);gap:8px}
+#editor .body{padding:14px 16px;overflow:auto;flex:1}
+#ed-sent{max-height:150px;font-size:12px;margin:0}
+#editor section{margin-bottom:4px}
+#editor .actions{border-top:1px solid var(--line);padding:10px 16px;display:flex;gap:8px;flex-wrap:wrap;background:var(--panel)}
+#editor label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);margin:14px 0 5px;font-weight:600}
+#editor label:first-child{margin-top:0}
+textarea,input.line{width:100%;font:inherit;font-size:12px;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:8px;resize:vertical}
+textarea.hdr{height:120px} textarea.bdy{height:170px}
+.hint{color:var(--dim);font-size:12px;margin:6px 0 0}
+.danger{border-color:var(--bad)!important;color:var(--bad)!important}
+.primary{border-color:var(--accent)!important;color:var(--accent)!important}
+@media(max-width:800px){main{flex-direction:column}#list{width:auto;height:45%;border-right:0;border-bottom:1px solid var(--line)}}
+</style>
+
+<header>
+  <span class="brand"><span class="dot" id="live"></span>ntcept</span>
+  <span class="meta" id="status">connecting…</span>
+  <input type="search" id="q" placeholder="filter: host, path, method, status, or /regex/ over bodies">
+  <button id="kindall" class="on" data-kind="">all</button>
+  <button data-kind="http">http</button>
+  <button data-kind="ws">ws</button>
+  <button data-kind="tcp">tcp</button>
+  <button data-kind="udp">udp</button>
+  <button id="pause">pause</button>
+  <button id="holdreq" title="hold each outbound request until you decide">hold requests</button>
+  <button id="holdres" title="hold each response before the app sees it">hold responses</button>
+  <button id="clear">clear</button>
+</header>
+<div id="heldbar"></div>
+<div id="editor" hidden><div class="box">
+  <header><span class="brand" id="ed-title">held</span><span class="meta" id="ed-sub"></span></header>
+  <div class="body">
+    <section id="sec-sent" hidden>
+      <label>request that produced this</label>
+      <pre id="ed-sent"></pre>
+    </section>
+    <section id="sec-req">
+      <label>method and url</label><input class="line" id="ed-target">
+      <label>request headers — one per line, <code>Name: value</code></label>
+      <textarea class="hdr" id="ed-headers"></textarea>
+      <label>request body</label><textarea class="bdy" id="ed-body"></textarea>
+    </section>
+    <section id="sec-res" hidden>
+      <label>status</label><input class="line" id="ed-status">
+      <label>response headers</label><textarea class="hdr" id="ed-res-headers"></textarea>
+      <label>response body</label><textarea class="bdy" id="ed-res-body"></textarea>
+    </section>
+    <p class="hint" id="ed-hint"></p>
+  </div>
+  <div class="actions" id="ed-actions"></div>
+</div></div>
+
+<main>
+  <div id="list"><div class="empty">waiting for traffic…</div></div>
+  <div id="detail"><div class="empty">select a flow</div></div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const flows = new Map();
+let selected = null, paused = false, kind = "", filter = "";
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const cls = f => f.error ? "bad" : f.status >= 500 ? "bad" : f.status >= 400 ? "warn" : f.status ? "ok" : "";
+
+function matches(f){
+  if (kind && f.kind !== kind) return false;
+  if (!filter) return true;
+  const m = filter.match(/^\/(.*)\/$/);
+  const hay = [f.host, f.path, f.url, f.method, f.status, f.proto, f.decision].join(" ");
+  if (m) { try { return new RegExp(m[1], "i").test(hay); } catch { return true; } }
+  return hay.toLowerCase().includes(filter.toLowerCase());
+}
+
+// protoLabel prefers the decoder's verdict (postgres, redis, dns …) over the bare transport,
+// so a database flow reads as its protocol here exactly as it does in `ntcept ls`.
+function protoLabel(f){
+  if ((f.kind === "tcp" || f.kind === "udp") && f.path && f.path !== "raw") return f.path;
+  return f.kind;
+}
+
+function render(){
+  const list = [...flows.values()].filter(matches).sort((a,b)=>a.seq-b.seq);
+  if (!list.length){ $("#list").innerHTML = '<div class="empty">no flows match</div>'; return; }
+  const rows = list.map(f => {
+    const where = f.kind === "http" ? esc(f.host) + esc(f.path || "") : esc(f.host)+":"+f.port+" · "+(f.messages?.length||0)+" msg";
+    const secret = f.redaction?.secrets?.length ? '<span class="tag secret">secret</span>' : "";
+    const dec = f.decision && f.decision !== "pass" ? '<span class="tag">'+esc(f.decision)+'</span>' : "";
+    return `<tr class="flow${selected===f.id?' sel':''}" data-id="${f.id}">
+      <td class="id">${f.id}</td>
+      <td class="t">${esc((f.start||"").slice(11,23))}</td>
+      <td class="m">${esc(f.method || protoLabel(f))}</td>
+      <td class="s ${cls(f)}">${f.error ? "err" : (f.status || (f.done?"—":"···"))}</td>
+      <td class="u">${where}${secret}${dec}</td>
+      <td class="ms">${f.done ? f.ms+"ms" : ""}</td></tr>`;
+  }).join("");
+  const el = $("#list");
+  const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  el.innerHTML = "<table>"+rows+"</table>";
+  if (stick) el.scrollTop = el.scrollHeight;
+}
+
+$("#list").addEventListener("click", e => {
+  const tr = e.target.closest("tr.flow");
+  if (tr) selectFlow(tr.dataset.id);
+});
+
+// Selecting a flow puts its id in the URL hash, so a flow is linkable and survives a reload.
+function selectFlow(id){
+  selected = id || null;
+  const h = id ? "#flow=" + id : "";
+  if (location.hash !== h) history.replaceState(null, "", location.pathname + location.search + h);
+  render();
+  if (id) detail(id);
+}
+function applyHash(){
+  const m = location.hash.match(/flow=([\w-]+)/);
+  if (m) selectFlow(m[1]);
+}
+window.addEventListener("hashchange", applyHash);
+
+async function detail(id){
+  const f = await (await fetch("/flows/"+id)).json();
+  const kv = o => Object.keys(o||{}).sort().map(k =>
+    `<dt>${esc(k)}</dt><dd${String(o[k]).includes("«")?' class="secret"':''}>${esc([].concat(o[k]).join(", "))}</dd>`).join("");
+  let h = `<h2>${esc(protoLabel(f))}${f.proto && f.proto !== f.kind ? " · "+esc(f.proto) : ""} · via ${esc(f.via||"")}</h2>
+    <dl><dt>${esc(f.method||"target")}</dt><dd>${esc(f.url || (f.host+":"+f.port))}</dd>
+    <dt>status</dt><dd class="${cls(f)}">${f.error ? esc(f.error) : (f.status||"—")}</dd>
+    <dt>duration</dt><dd>${f.ms}ms</dd>
+    ${f.decision?`<dt>decision</dt><dd>${esc(f.decision)}</dd>`:""}
+    ${f.redaction?.secrets?.length?`<dt>credentials</dt><dd class="secret">${esc(f.redaction.secrets.join(", "))} — masked at capture</dd>`:""}
+    </dl>`;
+  if (f.req_headers) h += `<h2>request headers</h2><dl>${kv(f.req_headers)}</dl>`;
+  if (f.req_body) h += `<h2>request body${f.req_truncated?" (truncated)":""}</h2><pre>${esc(pretty(f.req_body))}</pre>`;
+  if (f.res_headers) h += `<h2>response headers</h2><dl>${kv(f.res_headers)}</dl>`;
+  if (f.res_body) h += `<h2>response body${f.res_truncated?" (truncated)":""}</h2><pre>${esc(pretty(f.res_body))}</pre>`;
+  if (f.messages?.length){
+    h += `<h2>messages (${f.messages.length})</h2>` + f.messages.map(m =>
+      `<div class="msg"><span class="dir">${m.dir==="in"?"←":"→"}</span><span class="body">${esc(m.decoded || m.data || "("+m.size+" bytes)")}</span></div>`).join("");
+  }
+  $("#detail").innerHTML = h;
+}
+
+function pretty(s){
+  try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }
+}
+
+let current = null;   // the held exchange the editor is showing
+let composing = false; // writing a reply to a held request, rather than editing it
+
+function headersToText(h){
+  return Object.keys(h||{}).sort()
+    .flatMap(k => [].concat(h[k]).map(v => `${k}: ${v}`)).join("\n");
+}
+
+function parseHeaders(text){
+  const out = {};
+  text.split("\n").forEach(line => {
+    const i = line.indexOf(":");
+    if (i < 1) return;
+    const k = line.slice(0, i).trim();
+    if (k) out[k] = line.slice(i+1).trim();
+  });
+  return out;
+}
+
+// Only headers the operator actually changed are sent, so an untouched masked credential is
+// forwarded as its original value rather than as its fingerprint.
+function headerDelta(original, text){
+  const before = {};
+  Object.keys(original||{}).forEach(k => { before[k.toLowerCase()] = [].concat(original[k]).join(", "); });
+  const after = parseHeaders(text), set = {};
+  Object.keys(after).forEach(k => {
+    if (before[k.toLowerCase()] !== after[k]) set[k] = after[k];
+  });
+  const remove = Object.keys(before).filter(k => !(k.toLowerCase() in
+    Object.fromEntries(Object.keys(after).map(x => [x.toLowerCase(), 1]))));
+  return {set_headers: Object.keys(set).length ? set : undefined,
+          remove_headers: remove.length ? remove : undefined};
+}
+
+const BTN = {
+  forward:  '<button data-v="forward" class="primary">forward unchanged</button>',
+  edit:     '<button data-v="edit">forward with edits</button>',
+  compose:  '<button data-v="compose">answer locally…</button>',
+  send:     '<button data-v="respond" class="primary">send this reply</button>',
+  back:     '<button data-v="back">back to the request</button>',
+  drop:     '<button data-v="drop" class="danger">drop</button>',
+  close:    '<span style="flex:1"></span><button data-v="close">leave held</button>',
+};
+
+function renderActions(){
+  const isReq = current.stage === "request";
+  const set = composing ? [BTN.send, BTN.back, BTN.drop]
+            : isReq     ? [BTN.forward, BTN.edit, BTN.compose, BTN.drop]
+                        : [BTN.forward, BTN.edit, BTN.drop];
+  $("#ed-actions").innerHTML = set.join("") + BTN.close;
+}
+
+function openEditor(h){
+  current = h; composing = false;
+  const isReq = h.stage === "request";
+  $("#ed-title").textContent = `held ${h.stage}`;
+  $("#ed-sub").textContent = isReq ? h.host : `${h.status} from ${h.host}`;
+
+  // A response is not worth judging without the request that caused it.
+  $("#sec-sent").hidden = isReq;
+  if (!isReq){
+    $("#ed-sent").textContent =
+      `${h.method || ""} ${h.url || ""}\n\n${headersToText(h.req_headers)}` +
+      (h.req_body ? `\n\n${h.req_body}` : "");
+  }
+
+  $("#sec-req").hidden = !isReq;
+  $("#ed-target").value = `${h.method || "GET"} ${h.url || ""}`;
+  $("#ed-headers").value = headersToText(h.headers);
+  $("#ed-body").value = isReq ? (h.body || "") : "";
+
+  $("#sec-res").hidden = isReq;
+  $("#ed-status").value = h.status || 200;
+  $("#ed-res-headers").value = isReq ? "Content-Type: application/json" : headersToText(h.headers);
+  $("#ed-res-body").value = isReq ? "" : (h.body || "");
+
+  $("#ed-hint").textContent = isReq
+    ? "Nothing has been sent yet. A «name/fingerprint» value is a masked credential — leave it untouched and the real one is sent."
+    : "The application has not seen this yet.";
+  $("#editor").hidden = false;
+  renderActions();
+}
+
+function startComposing(){
+  composing = true;
+  $("#sec-req").hidden = true;
+  $("#sec-res").hidden = false;
+  $("#ed-hint").textContent =
+    "This reply is sent to the application. The request is never forwarded to " + current.host + ".";
+  renderActions();
+}
+
+function closeEditor(){ $("#editor").hidden = true; current = null; composing = false; }
+
+async function verdict(action){
+  if (!current) return;
+  const h = current, isReq = h.stage === "request";
+  const body = {action};
+
+  if (action === "respond"){
+    body.status = Number($("#ed-status").value) || 200;
+    body.set_headers = parseHeaders($("#ed-res-headers").value);
+    body.body = $("#ed-res-body").value;
+  } else if (action === "edit"){
+    if (isReq){
+      Object.assign(body, headerDelta(h.headers, $("#ed-headers").value));
+      const text = $("#ed-body").value;
+      if (text !== (h.body || "")) body.body = text;
+      const [m, ...rest] = $("#ed-target").value.trim().split(/\s+/);
+      if (m && m !== h.method) body.method = m;
+      const url = rest.join(" ");
+      if (url && url !== h.url) body.url = url;
+    } else {
+      Object.assign(body, headerDelta(h.headers, $("#ed-res-headers").value));
+      const text = $("#ed-res-body").value;
+      if (text !== (h.body || "")) body.body = text;
+      const st = Number($("#ed-status").value);
+      if (st && st !== h.status) body.status = st;
+    }
+  }
+
+  const res = await fetch("/queue/"+h.id, {method:"POST", body: JSON.stringify(body)});
+  if (!res.ok){
+    const e = await res.json().catch(() => ({}));
+    $("#ed-hint").textContent = e.error || "that exchange is no longer held";
+    return;
+  }
+  closeEditor();
+  heldBar();
+}
+
+$("#ed-actions").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  switch (b.dataset.v){
+    case "compose": startComposing(); break;
+    case "back":    openEditor(current); break;
+    case "close":   closeEditor(); break;
+    default:        verdict(b.dataset.v);
+  }
+});
+
+async function heldBar(){
+  const {held} = await (await fetch("/queue")).json();
+  const bar = $("#heldbar");
+  if (!held?.length){
+    bar.innerHTML = ""; bar.className = "";
+    if (current) closeEditor();
+    return;
+  }
+  bar.className = "held";
+  const h = held[0];
+  bar.innerHTML = `<span>${held.length} held · ${esc(h.stage)} ${esc(h.method||"")} ${esc(h.url || h.host)}</span>
+    <button id="openheld">open</button>`;
+  // A held exchange is blocking the application, so it is the only thing worth looking at.
+  if (!current) openEditor(h);
+}
+$("#heldbar").addEventListener("click", e => {
+  if (e.target.closest("#openheld")) heldBar();
+});
+
+async function setMode(patch){
+  const st = await (await fetch("/mode", {method:"POST", body: JSON.stringify(patch)})).json();
+  $("#holdreq").classList.toggle("on", !!st.hold_requests);
+  $("#holdres").classList.toggle("on", !!st.hold_responses);
+}
+$("#holdreq").addEventListener("click", () =>
+  setMode({hold_requests: !$("#holdreq").classList.contains("on")}));
+$("#holdres").addEventListener("click", () =>
+  setMode({hold_responses: !$("#holdres").classList.contains("on")}));
+
+async function boot(){
+  const st = await (await fetch("/status")).json();
+  const s = st.session || {};
+  $("#status").textContent = `proxy :${s.proxy_port} · ${s.command ? s.command.slice(0,60) : "no command"}`;
+  $("#holdreq").classList.toggle("on", !!st.hold_requests);
+  $("#holdres").classList.toggle("on", !!st.hold_responses);
+  const {flows:list} = await (await fetch("/flows")).json();
+  list.forEach(f => flows.set(f.id, f));
+  render(); heldBar();
+}
+
+function connect(){
+  const es = new EventSource("/events");
+  es.onopen = () => $("#live").classList.remove("off");
+  es.onerror = () => { $("#live").classList.add("off"); };
+  es.onmessage = () => {};
+  ["flow.new","flow.update","flow.done"].forEach(t => es.addEventListener(t, ev => {
+    if (paused) return;
+    const e = JSON.parse(ev.data);
+    if (e.flow){ flows.set(e.flow.id, e.flow); render(); if (selected === e.flow.id) detail(selected); }
+  }));
+  ["held.new","held.gone"].forEach(t => es.addEventListener(t, heldBar));
+}
+
+$("#q").addEventListener("input", e => { filter = e.target.value.trim(); render(); });
+document.querySelectorAll("button[data-kind]").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll("button[data-kind]").forEach(x => x.classList.remove("on"));
+  b.classList.add("on"); kind = b.dataset.kind; render();
+}));
+$("#pause").addEventListener("click", e => { paused = !paused; e.target.classList.toggle("on", paused); e.target.textContent = paused ? "paused" : "pause"; });
+$("#clear").addEventListener("click", async () => { await fetch("/clear",{method:"POST"}); flows.clear(); selectFlow(null); $("#detail").innerHTML='<div class="empty">select a flow</div>'; render(); });
+
+boot(); connect(); applyHash();
+</script>

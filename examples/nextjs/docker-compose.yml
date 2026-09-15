@@ -1,0 +1,39 @@
+# The datastores the example app talks to.
+#
+# The app itself is deliberately not in here. ntcept supervises a command you run, and the point
+# of this example is to watch a process on your own machine talk to services that are somewhere
+# else — which is what a real dev setup looks like. Running the app in compose too would put it
+# on a network ntcept was never asked to watch.
+#
+#   docker compose up -d
+#   ntcept run -- npm run dev
+#
+# The ports are deliberately not the default ones. A decoder that only recognises postgres on
+# 5432 works in an example and nowhere else; these prove the protocol is recognised from what is
+# on the wire.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+      POSTGRES_DB: shop
+    ports:
+      - "15432:5432"
+    volumes:
+      - ./seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop -d shop"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
