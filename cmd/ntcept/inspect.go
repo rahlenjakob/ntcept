@@ -216,6 +216,15 @@ func renderFlow(f map[string]any, full bool) {
 			fmt.Printf("  %s%-7s %s\n", arrow, opcode, clip(text, full))
 		}
 	}
+
+	if lines, ok := f["script_log"].([]any); ok && len(lines) > 0 {
+		fmt.Printf("\nscript log (%d)\n", len(lines))
+		for _, l := range lines {
+			if s, ok := l.(string); ok {
+				fmt.Printf("  %s\n", s)
+			}
+		}
+	}
 }
 
 func printHeaders(label string, v any) {

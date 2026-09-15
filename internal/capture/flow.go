@@ -65,6 +65,10 @@ type Flow struct {
 
 	Messages []Message `json:"messages,omitempty"`
 
+	// ScriptLog holds the lines an interception script logged while judging this flow's messages,
+	// so `ntcept show` can replay what the policy saw and decided for this request.
+	ScriptLog []string `json:"script_log,omitempty"`
+
 	Decision  Decision      `json:"decision,omitempty"`
 	Redaction redact.Report `json:"redaction,omitempty"`
 	// Error is a failure: the exchange did not complete. Note is an observation about a flow

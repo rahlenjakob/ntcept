@@ -12,6 +12,7 @@ import (
 
 	"github.com/rahlenjakob/ntcept/internal/capture"
 	"github.com/rahlenjakob/ntcept/internal/redact"
+	"github.com/rahlenjakob/ntcept/internal/script"
 )
 
 // Headers that belong to one hop and must not be forwarded.
@@ -92,6 +93,52 @@ func (s *Server) proxyHTTP(w http.ResponseWriter, r *http.Request, t target, pro
 		reqView, _ = redact.Body(reqBody, contentType)
 	}
 
+	// A loaded script gets first say on the request. It can forward, delay, edit, drop, answer
+	// locally, or hold() it for the manual queue (falling through to HoldRequests below).
+	if s.Script.Enabled() {
+		res, ok := s.Script.Eval(script.Event{
+			Hook: "on_request", Exchange: f.ID, Kind: "http", Proto: "http",
+			Host: host, Port: port, Direction: "request",
+			Method: r.Method, URL: u.String(), Path: u.Path, Headers: reqHdr, Body: capture.Printable(reqView),
+		})
+		if ok && len(res.Logs) > 0 {
+			s.attachScriptLogs(f, res.Logs)
+		}
+		if ok && res.Action != script.Hold {
+			if res.DelayMS > 0 {
+				time.Sleep(time.Duration(res.DelayMS) * time.Millisecond)
+			}
+			switch res.Action {
+			case script.Drop:
+				s.decide(f, capture.DecisionDrop)
+				hijackClose(w)
+				return
+			case script.Respond:
+				s.decide(f, capture.DecisionRespond)
+				s.writeSynthetic(w, f, verdictFromScript(res), started)
+				return
+			case script.Edit:
+				v := verdictFromScript(res)
+				applyEdit(r.Header, v)
+				if v.Method != "" {
+					r.Method = v.Method
+				}
+				if v.URL != "" {
+					if nu, err := url.Parse(v.URL); err == nil {
+						u = nu
+					}
+				}
+				if v.Body != nil {
+					reqBody = []byte(*v.Body)
+					bodyReader = io.NopCloser(bytes.NewReader(reqBody))
+					r.Header.Set("Content-Length", strconv.Itoa(len(reqBody)))
+					r.ContentLength = int64(len(reqBody))
+				}
+				s.decide(f, capture.DecisionEdit)
+			}
+		}
+	}
+
 	if s.HoldRequests.Load() {
 		v, ok := s.hold(f, &capture.Held{
 			FlowID: f.ID, Stage: capture.StageRequest, Host: host, Method: r.Method,
@@ -162,6 +209,14 @@ func (s *Server) proxyHTTP(w http.ResponseWriter, r *http.Request, t target, pro
 		return
 	}
 	defer res.Body.Close()
+
+	// A loaded script gets first say on the response too. It fully handles the response unless it
+	// passes or holds, in which case it restores the body and the paths below take over.
+	if s.Script.Enabled() {
+		if s.scriptResponse(w, f, res, host, started, sentRequest{Method: r.Method, URL: u.String()}) {
+			return
+		}
+	}
 
 	if s.HoldResponses.Load() {
 		// A streamed request body only lands in the tee once the round trip consumed it.
@@ -366,6 +421,89 @@ func (s *Server) writeSynthetic(w http.ResponseWriter, f *capture.Flow, v captur
 	s.Store.Touch(f, capture.EventFlowUpdate, func(f *capture.Flow) {
 		f.Status, f.ResLen, f.ResBody = status, len(body), body
 		f.ResHdr = resHdr
+		f.MS = time.Since(started).Milliseconds()
+	})
+	s.Store.Finish(f, nil)
+}
+
+// scriptResponse lets a loaded script judge an HTTP response. It buffers the body once and returns
+// true when it has fully handled the response; false means pass or hold — the body is restored so
+// the manual/normal paths can take over.
+func (s *Server) scriptResponse(w http.ResponseWriter, f *capture.Flow, res *http.Response, host string, started time.Time, sent sentRequest) (done bool) {
+	body, _ := io.ReadAll(io.LimitReader(res.Body, maxHoldBody))
+	readable, wasEncoded := decodeBody(body, res.Header.Get("Content-Encoding"))
+	view, _ := redact.Body(readable, res.Header.Get("Content-Type"))
+	resHdr, _ := redact.Headers(res.Header)
+
+	r2, ok := s.Script.Eval(script.Event{
+		Hook: "on_response", Exchange: f.ID, Kind: "http", Proto: "http", Host: host, Direction: "response",
+		Method: sent.Method, URL: sent.URL, Status: res.StatusCode, Headers: resHdr, Body: capture.Printable(view),
+	})
+	if ok && len(r2.Logs) > 0 {
+		s.attachScriptLogs(f, r2.Logs)
+	}
+	if !ok || r2.Action == script.Hold {
+		res.Body = io.NopCloser(bytes.NewReader(body)) // restore for the caller
+		return false
+	}
+	if r2.DelayMS > 0 {
+		time.Sleep(time.Duration(r2.DelayMS) * time.Millisecond)
+	}
+	switch r2.Action {
+	case script.Drop:
+		s.decide(f, capture.DecisionDrop)
+		hijackClose(w)
+		s.Store.Finish(f, nil)
+		return true
+	case script.Record:
+		// Forward the real body, but store the redacted rendering the script asked for.
+		s.writeResponse(w, f, res, body, started, recordText(string(view), r2))
+		return true
+	case script.Edit, script.Respond:
+		v := verdictFromScript(r2)
+		applyEdit(res.Header, v)
+		if v.Status != 0 {
+			res.StatusCode = v.Status
+		}
+		if v.Body != nil {
+			body = []byte(*v.Body)
+			if wasEncoded {
+				res.Header.Del("Content-Encoding")
+			}
+		}
+		s.decide(f, capture.Decision(r2.Action))
+		s.writeResponse(w, f, res, body, started, "")
+		return true
+	}
+	res.Body = io.NopCloser(bytes.NewReader(body)) // pass: let the caller write it
+	return false
+}
+
+// writeResponse sends a (possibly edited) response to the client and stores it, with an optional
+// override for the stored body — used by record to keep the real body on the wire but a redacted
+// copy in the buffer.
+func (s *Server) writeResponse(w http.ResponseWriter, f *capture.Flow, res *http.Response, body []byte, started time.Time, storedOverride string) {
+	for _, h := range hopByHop {
+		res.Header.Del(h)
+	}
+	res.Header.Del("Content-Length")
+	copyHeaders(w.Header(), res.Header)
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(res.StatusCode)
+	_, _ = w.Write(body)
+
+	finalHdr, _ := redact.Headers(res.Header)
+	stored, _ := decodeBody(body, res.Header.Get("Content-Encoding"))
+	storedBody, storedRep := redact.Body(stored, res.Header.Get("Content-Type"))
+	if storedOverride != "" {
+		storedBody = []byte(storedOverride)
+	}
+	s.Store.Touch(f, capture.EventFlowUpdate, func(f *capture.Flow) {
+		f.Status = res.StatusCode
+		f.ResHdr = finalHdr
+		f.ResLen = len(body)
+		f.ResBody = storedBody
+		f.Redaction.Merge(storedRep)
 		f.MS = time.Since(started).Milliseconds()
 	})
 	s.Store.Finish(f, nil)

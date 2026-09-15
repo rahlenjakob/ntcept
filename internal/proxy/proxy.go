@@ -22,12 +22,14 @@ import (
 
 	"github.com/rahlenjakob/ntcept/internal/ca"
 	"github.com/rahlenjakob/ntcept/internal/capture"
+	"github.com/rahlenjakob/ntcept/internal/script"
 )
 
 type Server struct {
-	Store *capture.Store
-	CA    *ca.Authority
-	Queue *capture.Queue
+	Store  *capture.Store
+	CA     *ca.Authority
+	Queue  *capture.Queue
+	Script *script.Engine // programmable policy; nil or disabled means pass everything
 
 	transport *http.Transport
 	h2        *http2.Server

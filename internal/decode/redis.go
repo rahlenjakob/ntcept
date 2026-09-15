@@ -11,7 +11,10 @@ import (
 // negotiates RESP3 with HELLO at connect time. A decoder that only knows RESP2 stops producing
 // anything the moment a server answers with a map or a set — it does not fail loudly, it simply
 // falls silent, which is the worst way for this to be wrong.
-type resp struct{ buf []byte }
+type resp struct {
+	buf    []byte
+	server bool // the reply side, so held messages can be limited to commands and errors
+}
 
 func (r *resp) Feed(b []byte) []string {
 	r.buf = append(r.buf, b...)
@@ -30,6 +33,30 @@ func (r *resp) Feed(b []byte) []string {
 		r.buf = nil
 	}
 	return out
+}
+
+// Frame parses complete RESP messages from the front of buf, which the caller owns, so a command
+// or reply can be held on its way through.
+func (r *resp) Frame(buf []byte) (frames []Frame, consumed int, ok bool) {
+	for {
+		s, n := parseRESP(buf[consumed:], 0)
+		if n == 0 {
+			return frames, consumed, true
+		}
+		frames = append(frames, Frame{
+			Bytes: buf[consumed : consumed+n], Text: s, Kind: firstToken(s),
+			Holdable: r.holdable(s),
+		})
+		consumed += n
+	}
+}
+
+// holdable pauses a client command, or a server error reply, and lets everything else through.
+func (r *resp) holdable(text string) bool {
+	if r.server {
+		return strings.HasPrefix(text, "(error)")
+	}
+	return text != ""
 }
 
 // parseRESP returns the rendered value and how many bytes it consumed, or 0 if incomplete.

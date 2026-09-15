@@ -26,7 +26,26 @@ type Held struct {
 	ReqHeaders http.Header `json:"req_headers,omitempty"`
 	ReqBody    string      `json:"req_body,omitempty"`
 
+	// Message-level fields, set for a held database/TCP frame rather than an HTTP exchange.
+	Kind    Kind   `json:"kind,omitempty"`     // "tcp" for a database/raw frame
+	Proto   string `json:"proto,omitempty"`    // the decoded wire protocol, e.g. "postgres"
+	Dir     Dir    `json:"dir,omitempty"`      // which way the frame was travelling
+	MsgKind string `json:"msg_kind,omitempty"` // the message type, e.g. "Query", "Bind"
+	Text    string `json:"text,omitempty"`     // the decoded, human-readable message
+	Raw     string `json:"raw,omitempty"`      // the frame's wire bytes, printable or base64
+	SQL     string `json:"sql,omitempty"`      // the statement text, for a message that carries one
+	// Row is a returned result row's column values, for a held DataRow. A nil entry is SQL NULL.
+	Row []*string `json:"row,omitempty"`
+
 	ch chan Verdict
+}
+
+// ProtoError answers a held database request locally with a protocol error. The fields are
+// protocol-shaped — Code is a SQLSTATE for Postgres.
+type ProtoError struct {
+	Code     string `json:"code,omitempty"`
+	Message  string `json:"message,omitempty"`
+	Severity string `json:"severity,omitempty"`
 }
 
 type Verdict struct {
@@ -37,6 +56,12 @@ type Verdict struct {
 	Body          *string           `json:"body,omitempty"`
 	Method        string            `json:"method,omitempty"`
 	URL           string            `json:"url,omitempty"`
+
+	// Message-level verdict fields, for a held database/TCP frame.
+	Raw   *string     `json:"raw,omitempty"`   // edit: replacement wire bytes (printable or base64)
+	SQL   *string     `json:"sql,omitempty"`   // edit: rebuild the message around this statement text
+	Row   []*string   `json:"row,omitempty"`   // edit: rebuild a result row from these column values
+	Error *ProtoError `json:"error,omitempty"` // respond: answer the request with this error
 }
 
 type Queue struct {

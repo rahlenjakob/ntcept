@@ -98,6 +98,17 @@ func queueCmd(args []string) int {
 			return
 		}
 		for _, h := range out.Held {
+			// A database/TCP message reads by its protocol and decoded text, not method and URL.
+			if h.Kind == capture.KindTCP {
+				dir := "request"
+				if h.Dir == capture.In {
+					dir = "response"
+				}
+				fmt.Printf("%s  %s %s  held %s\n", h.ID, h.Proto, dir, time.Since(h.At).Truncate(time.Second))
+				fmt.Printf("  %s\n", h.Text)
+				fmt.Println()
+				continue
+			}
 			fmt.Printf("%s  %s  held %s\n", h.ID, h.Stage, time.Since(h.At).Truncate(time.Second))
 			if h.Stage == capture.StageRequest {
 				fmt.Printf("  %s %s\n", h.Method, h.URL)
@@ -150,6 +161,10 @@ func verdictCmd(action capture.Action) func([]string) int {
 		bodyArg := fs.String("body", "", "replacement body; @file reads a file, - reads stdin")
 		method := fs.String("method", "", "replacement method")
 		target := fs.String("url", "", "replacement URL")
+		// Database/TCP holds: rewrite a message's wire bytes, or answer a request with an error.
+		sqlArg := fs.String("sql", "", "replacement SQL for a held query; rebuilds the message (edit)")
+		rawArg := fs.String("set-raw", "", "replacement wire bytes for a database/TCP message; @file or - (edit)")
+		pgError := fs.String("pg-error", "", "answer a held Postgres request with an error, `SQLSTATE: message` (respond)")
 		var set kvFlag
 		var del kvFlag
 		fs.Var(&set, "set-header", "set a header, Name: value (repeatable)")
@@ -183,6 +198,21 @@ func verdictCmd(action capture.Action) func([]string) int {
 			s := string(b)
 			v.Body = &s
 		}
+		if *sqlArg != "" {
+			s := *sqlArg
+			v.SQL = &s
+		}
+		if *rawArg != "" {
+			b, err := readBodyArg(*rawArg)
+			if err != nil {
+				return die("%v", err)
+			}
+			s := capture.Printable(b)
+			v.Raw = &s
+		}
+		if *pgError != "" {
+			v.Error = parsePGError(*pgError)
+		}
 
 		c, err := dial()
 		if err != nil {
@@ -195,6 +225,18 @@ func verdictCmd(action capture.Action) func([]string) int {
 		fmt.Printf("%s %s\n", ids[0], action)
 		return 0
 	}
+}
+
+// parsePGError reads a `SQLSTATE: message` argument into an error to answer a held request with.
+// A bare message (no colon, or no five-character SQLSTATE) is taken as the message alone.
+func parsePGError(arg string) *capture.ProtoError {
+	if code, msg, ok := strings.Cut(arg, ":"); ok {
+		code = strings.TrimSpace(code)
+		if len(code) == 5 {
+			return &capture.ProtoError{Code: code, Message: strings.TrimSpace(msg)}
+		}
+	}
+	return &capture.ProtoError{Message: strings.TrimSpace(arg)}
 }
 
 func readBodyArg(arg string) ([]byte, error) {

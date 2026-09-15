@@ -80,7 +80,36 @@ def spans(line):
             else: push(t, FG)
         return out
 
+    stripped = line.lstrip()
+    if stripped.startswith(("def ", "if ", "elif ", "else", "return ", "import ", "for ",
+                            "while ", "state")) or (line.startswith("    ") and stripped):
+        return py_spans(line)
+
     push(line, FG)
+    return out
+
+PY_KW = {"def", "if", "elif", "else", "return", "and", "or", "not", "in",
+         "import", "for", "while", "None", "True", "False", "is"}
+PY_FN = {"respond", "delay", "drop", "record", "edit", "hold", "log"}
+
+def py_spans(line):
+    """Light Python highlighting for a rule shown on a card."""
+    code, comment = line, None
+    h = line.find("#")
+    if h >= 0:
+        code, comment = line[:h], line[h:]
+    out = []
+    for tok in re.findall(r'"[^"]*"|\'[^\']*\'|\w+|\W+', code):
+        if tok and tok[0] in "\"'":
+            out.append((tok, GREEN))
+        elif tok in PY_KW:
+            out.append((tok, MAGENTA))
+        elif tok in PY_FN:
+            out.append((tok, CYAN))
+        else:
+            out.append((tok, FG))
+    if comment is not None:
+        out.append((comment, DIM))
     return out
 
 def render(title, lines, out_path, width_chars=None):
@@ -149,3 +178,19 @@ mod_lines = [
  "←  the app got  200  {\"stubbed\":\"by ntcept\"}   — httpbin never saw it",
 ]
 render("hold a request · answer it yourself", mod_lines, "assets/modify.svg")
+
+# The programmable interception layer: a small stateful policy in Python, applied live.
+script_lines = [
+ "$ cat rules.py",
+ "def on_request(m):",
+ "    if \"stripe\" in m.host:                 # count each payment the app makes",
+ "        state[\"paid\"] = state.get(\"paid\", 0) + 1",
+ "    if m.proto == \"postgres\" and state.get(\"paid\", 0) > 3:",
+ "        return respond(pg_error=\"too many orders\")   # fault the next DB read",
+ "",
+ "$ ntcept script load rules.py --watch",
+ "→  http      api.stripe.com/charges                     paid = 3",
+ "→  postgres  select … from orders                        paid = 4",
+ "←  postgres  40001  \"too many orders\"       — injected, the query never ran",
+]
+render("stateful policy in Python · ntcept script", script_lines, "assets/script.svg")

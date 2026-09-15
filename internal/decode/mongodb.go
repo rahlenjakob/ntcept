@@ -26,26 +26,64 @@ type mongo struct {
 func (m *mongo) Feed(b []byte) []string {
 	m.buf = append(m.buf, b...)
 	var out []string
-	for len(m.buf) >= 16 {
-		n := int(int32(be32le(m.buf)))
-		if n < 16 || n > 48<<20 {
+	for {
+		text, _, n, ok := m.parseOne(m.buf)
+		if !ok {
 			// Not a length this protocol produces; the stream is not what was assumed.
 			m.buf = nil
 			break
 		}
-		if len(m.buf) < n {
+		if n == 0 {
 			break
 		}
-		if s := m.render(m.buf[:n]); s != "" {
-			out = append(out, s)
-		}
 		m.buf = m.buf[n:]
+		if text != "" {
+			out = append(out, text)
+		}
 	}
 	if len(m.buf) > 48<<20 {
 		m.buf = nil
 	}
 	return out
 }
+
+// Frame parses complete MongoDB messages from the front of buf, which the caller owns, so a command
+// can be held on its way through.
+func (m *mongo) Frame(buf []byte) (frames []Frame, consumed int, ok bool) {
+	for {
+		text, kind, n, good := m.parseOne(buf[consumed:])
+		if !good {
+			return frames, consumed, false
+		}
+		if n == 0 {
+			return frames, consumed, true
+		}
+		frames = append(frames, Frame{
+			Bytes: buf[consumed : consumed+n], Text: text, Kind: kind, Holdable: m.holdable(kind),
+		})
+		consumed += n
+	}
+}
+
+// parseOne reads one MongoDB message from the front of buf. ok is false when the length prefix is
+// not one this protocol produces, which means the stream desynced or was never MongoDB.
+func (m *mongo) parseOne(buf []byte) (text, kind string, n int, ok bool) {
+	if len(buf) < 16 {
+		return "", "", 0, true
+	}
+	ln := int(int32(be32le(buf)))
+	if ln < 16 || ln > 48<<20 {
+		return "", "", 0, false
+	}
+	if len(buf) < ln {
+		return "", "", 0, true
+	}
+	text = m.render(buf[:ln])
+	return text, firstToken(text), ln, true
+}
+
+// holdable pauses a client command; replies and everything else pass through.
+func (m *mongo) holdable(kind string) bool { return m.client && kind == "OP_MSG" }
 
 func (m *mongo) render(msg []byte) string {
 	switch op := be32le(msg[12:]); op {

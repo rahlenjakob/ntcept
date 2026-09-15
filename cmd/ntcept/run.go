@@ -26,6 +26,8 @@ func runCmd(args []string) int {
 	fs.Var(&publish, "publish", "expose a port the command binds, as 3000 or 8080:3000 (repeatable)")
 	noPublish := fs.Bool("no-publish", false, "do not expose ports the command binds")
 	name := fs.String("name", "", "name this session, so `ntcept ls --session <name>` can address it")
+	scriptPath := fs.String("script", "", "load a Python interception script at start (see `ntcept script`)")
+	scriptWatch := fs.Bool("watch", false, "reload the --script file automatically when it changes")
 	var captureLocal portList
 	fs.Var(&captureLocal, "capture-local",
 		"capture localhost:PORT from the first connection, rather than from the second (repeatable)")
@@ -61,7 +63,7 @@ func runCmd(args []string) int {
 	rt, err := attach.Start(attach.Options{
 		ProxyPort: *proxyPort, ControlPort: *controlPort,
 		BufferMB: *bufferMB, MaxBodyKB: *maxBodyKB,
-		Args: cmdArgs, Name: *name,
+		Args: cmdArgs, Name: *name, Script: *scriptPath, Watch: *scriptWatch,
 	})
 	if err != nil {
 		return die("%v", err)

@@ -90,7 +90,7 @@ func (r *resolver) decide() {
 	c, s := r.heldClient, r.heldServer
 	switch {
 	case looksRedis(r.port, c):
-		r.use("redis", &resp{}, &resp{})
+		r.use("redis", &resp{}, &resp{server: true})
 	case looksPostgres(r.port, c):
 		r.use("postgres", &pg{client: true}, &pg{})
 	case looksMySQL(r.port, s):
@@ -108,6 +108,27 @@ func (r *resolver) decide() {
 
 func (r *resolver) use(name string, client, server Stream) {
 	r.name, r.client, r.server = name, client, server
+}
+
+// Framer returns the message framer for one direction of the connection, or nil when this stream
+// cannot be framed: while the protocol is still undecided, once it has resolved to the raw
+// fallback, or for a decoder that does not implement framing. The relay reads this to decide
+// whether a direction can be held and rewritten rather than only watched.
+func (c *Codec) Framer(server bool) Framer {
+	r := c.r
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.name == "" || r.name == "raw" {
+		return nil
+	}
+	stream := r.client
+	if server {
+		stream = r.server
+	}
+	if fr, ok := stream.(Framer); ok {
+		return fr
+	}
+	return nil
 }
 
 // Protocol is what the connection turned out to be speaking, or "raw" while it is still unclear.

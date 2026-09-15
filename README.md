@@ -16,8 +16,10 @@ ran and with which parameters, or the error the database actually returned. ntce
 this program do on the network?" into structured output: run anything under `ntcept`, and every
 connection it opens — an HTTPS call to a third-party API, a query to Postgres, a call to Redis — is
 captured, decoded, and queryable, tied to the process that made it. And the same path that watches
-traffic can change it: drop a request, inject a fault, rewrite a response. It's also a sharp
-inspector for a person (`ntcept ui`).
+traffic can change it: drop a request, inject a fault, rewrite a response — by hand, or from a few
+lines of **Python that decide per request, with memory of everything that came before** (*"fault 5%
+of Postgres selects after a Stripe call over $200"*). It's also a sharp inspector for a person
+(`ntcept ui`).
 
 ## Built for agents
 
@@ -45,6 +47,11 @@ Three things make it fit an agent rather than a human staring at a GUI:
   drop a request, stall it, rewrite its body or headers, or answer it with a canned response — with
   no mock server, no fault-injection library, and no edit to the code under test (see
   [Modifying traffic](#modifying-traffic)).
+- **Policy as code, hot-reloaded.** When the rule is conditional and stateful — *"fault 5% of
+  Postgres selects after a Stripe call over $200, until a Redis key clears"* — an agent writes it as
+  a few lines of Python instead of a wall of flags. ntcept runs that script against every request,
+  with in-memory state across the whole run, and reloads it the moment the file changes (see
+  [Programmable interception](#programmable-interception)).
 
 ## Why not a proxy or a sniffer
 
@@ -122,6 +129,79 @@ ntcept edit h1 --set-header 'X-Debug: 1' --url https://staging.example.com/v2/or
 
 `edit` reaches the upstream changed; `respond` keeps the request from ever leaving the machine.
 The inspector does the same thing with a form.
+
+**Databases are held the same way, one message at a time.** Because ntcept frames the wire protocol
+rather than treating a database connection as an opaque byte stream, a query can be paused,
+dropped, rewritten or answered exactly like an HTTP request — the same reason the unhappy path is
+hard to trigger applies double to a database, where you cannot make Postgres return a serialization
+failure or a dead connection to order:
+
+```bash
+ntcept intercept on                 # holds queries; add --responses to hold results too
+ntcept queue                        # e.g.  h1  postgres request  held 2s
+                                    #         Query select * from orders where id = $1
+ntcept drop h1                      # tear the connection down, as the network would
+ntcept respond h1 --pg-error '40001: could not serialize access'   # answer locally; never runs
+ntcept edit h1 --set-raw @rewritten.bin                            # rewrite the message on the wire
+```
+
+`respond` synthesises a real protocol reply (for Postgres, an `ErrorResponse` and the
+`ReadyForQuery` that returns the driver to a usable state), so the application's own error handling
+runs against an error the server never sent. Holding, dropping and editing work for PostgreSQL,
+MySQL, Redis and MongoDB; local `respond` is Postgres today. Answer a request on the first message
+of the query — the connection stays healthy afterwards.
+
+## Programmable interception
+
+Flags answer one request at a time. Real fault scenarios are *conditional and stateful* — they
+depend on what happened earlier, on this connection or a different one, across HTTP **and** the
+database. So ntcept lets you hand it a **Python script** that decides, per message, what to do:
+forward, delay, drop, rewrite, answer locally, hand to the manual queue, or redact what gets stored.
+It runs in a `python3` worker ntcept manages, keeps arbitrary state in memory for the whole run, and
+**reloads the instant you save the file** — no restart, no lost state.
+
+<p align="center"><img src="assets/script.svg" alt="a Python rule counting the app's Stripe calls in memory, then faulting a Postgres query once orders pile up" width="703"></p>
+
+```python
+# rules.py — one file; ntcept calls on_request(m) / on_response(m) for every message.
+import random
+state = {}                                   # persists across every request, and across reloads
+
+def on_request(m):
+    # An outbound call to Stripe over $200 arms the policy (cross-flow state).
+    if m.proto == "http" and "stripe" in m.host and (m.json or {}).get("amount", 0) > 20000:
+        state["armed"] = True
+    # A Redis GET of "reset" disarms it.
+    if m.proto == "redis" and m.cmd == "GET" and m.args[:1] == ["reset"]:
+        state["armed"] = False
+    # While armed, fault 5% of Postgres SELECTs and slow the rest.
+    if m.proto == "postgres" and m.is_select and state.get("armed"):
+        return respond(pg_error="40001: injected") if random.random() < 0.05 else delay(800)
+
+def on_response(m):
+    # Dynamic redaction: scrub a column from the stored copy; the app still gets the real row.
+    if m.proto == "postgres" and m.row:
+        return record(redact=[m.row[1]])
+```
+
+```bash
+ntcept run --script rules.py --watch -- npm run dev   # load at start, reload on save
+cat rules.py | ntcept script load -                   # or pipe code straight in
+ntcept script reload      # re-read, keep state        ntcept script reset   # re-read, wipe state
+ntcept script status      # calls, verdict counts      ntcept script logs    # per-request output
+```
+
+- **State that spans the run.** `state` is one dict that survives every request and every reload
+  (only `reset` clears it); `m.ctx` is a per-exchange dict shared between a request and its response.
+- **Every lever the manual queue has** — `drop()`, `delay(ms)`, `edit(sql=…, row=[…], body=…)`,
+  `respond(pg_error=…)`, `hold()` (defer to a person), plus `record(redact=[…])` to scrub the stored
+  copy while the real bytes go on the wire. Any verdict can carry a delay.
+- **Written for agents.** `log(…)` lines are attached to the exact request that produced them —
+  `ntcept show <id>` replays them, and `ntcept script logs` tags every line by flow id. A rule that
+  throws or hangs **fails open**: the traffic passes untouched and the error surfaces in `status`.
+- Scripting needs `python3` on PATH (`ntcept doctor` checks); without it, the tool says so rather
+  than pretending. While a script is loaded it is in control, and the inspector disables the manual
+  hold toggles to match.
 
 ## Quickstart
 

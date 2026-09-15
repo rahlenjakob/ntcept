@@ -63,6 +63,17 @@ func doctorCmd(args []string) int {
 			"load the tun module, or pass --device /dev/net/tun to your container runtime")
 	}
 
+	// Scripting is optional; python3 is only needed for `ntcept script`. Report it, but do not fail
+	// the machine over its absence.
+	if p, perr := exec.LookPath("python3"); perr == nil {
+		add("python3 (scripting)", true, p, "")
+	} else if p, perr := exec.LookPath("python"); perr == nil {
+		add("python3 (scripting)", true, p, "")
+	} else {
+		add("python3 (scripting)", false, "not on PATH — `ntcept script` is unavailable",
+			"install python3 to run interception scripts")
+	}
+
 	if sessions, err := attach.ListSessions(); err == nil && len(sessions) > 0 {
 		for _, s := range sessions {
 			add("session "+s.Name, true,
@@ -120,7 +131,8 @@ func doctorCmd(args []string) int {
 // roots is a fact about that runtime, not a fault in this machine's setup.
 func failed(checks []check) int {
 	for _, c := range checks {
-		if c.OK || c.Name == "session running" || strings.Contains(c.Name, "trusts ntcept") {
+		if c.OK || c.Name == "session running" || strings.Contains(c.Name, "trusts ntcept") ||
+			strings.Contains(c.Name, "scripting") {
 			continue
 		}
 		return 1

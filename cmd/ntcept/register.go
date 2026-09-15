@@ -18,6 +18,7 @@ func register() {
 		{"drop", "ntcept drop <held-id>", "kill a held exchange, as the network would", verdictCmd(capture.ActionDrop)},
 		{"edit", "ntcept edit <held-id>", "modify a held exchange, then send it on", verdictCmd(capture.ActionEdit)},
 		{"respond", "ntcept respond <held-id>", "answer a held request locally, never sending it", verdictCmd(capture.ActionRespond)},
+		{"script", "ntcept script <load|reload|reset|off|status|logs>", "run Python that decides what to intercept", scriptCmd},
 		{"ui", "ntcept ui", "open the inspector in a browser", uiCmd},
 		{"status", "ntcept status", "what the running session is doing", statusCmd},
 		{"sessions", "ntcept sessions", "list the ntcept sessions running now", sessionsCmd},

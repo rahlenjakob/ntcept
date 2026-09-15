@@ -28,43 +28,106 @@ type pg struct {
 	stmts map[string]string
 	// portals maps a portal to the statement it was bound from, for the same reason.
 	portals map[string]string
+	// encrypted is set once the client asked for TLS: everything after an SSLRequest is an
+	// opaque handshake this decoder cannot read, and must not try to frame.
+	encrypted bool
 }
 
 func (p *pg) Feed(b []byte) []string {
 	p.buf = append(p.buf, b...)
 	var out []string
 	for {
-		// The client's first message has no type byte: it is a length and a protocol version.
-		if p.client && !p.started {
-			if len(p.buf) < 8 {
-				break
-			}
-			n := int(be32(p.buf))
-			if n < 8 || len(p.buf) < n {
-				break
-			}
-			out = append(out, p.startup(p.buf[:n]))
-			p.buf = p.buf[n:]
-			continue
-		}
-		if len(p.buf) < 5 {
+		text, _, n, ok := p.parseOne(p.buf)
+		if !ok || n == 0 {
 			break
 		}
-		typ := p.buf[0]
-		n := int(be32(p.buf[1:])) + 1
-		if n < 5 || len(p.buf) < n {
-			break
-		}
-		if s := p.render(typ, p.buf[5:n]); s != "" {
-			out = append(out, s)
+		if text != "" {
+			out = append(out, text)
 		}
 		p.buf = p.buf[n:]
-		p.started = true
 	}
 	if len(p.buf) > 4<<20 {
 		p.buf = nil
 	}
 	return out
+}
+
+// Frame parses complete Postgres messages from the front of buf without buffering: the caller owns
+// the bytes. It is what lets the relay hold or rewrite one message at a time.
+func (p *pg) Frame(buf []byte) (frames []Frame, consumed int, ok bool) {
+	for {
+		text, kind, n, good := p.parseOne(buf[consumed:])
+		if !good {
+			return frames, consumed, false
+		}
+		if n == 0 {
+			return frames, consumed, true
+		}
+		frames = append(frames, Frame{
+			Bytes: buf[consumed : consumed+n], Text: text, Kind: kind,
+			Holdable: p.holdable(kind),
+		})
+		consumed += n
+	}
+}
+
+// parseOne reads exactly one message from the front of buf, advancing the decoder's protocol
+// state. It is byte-stateless: the buffer belongs to the caller. n is 0 with ok=true when buf holds
+// only part of a message (feed more); ok is false when the stream can no longer be read as
+// Postgres (a TLS upgrade), so the caller stops framing.
+func (p *pg) parseOne(buf []byte) (text, kind string, n int, ok bool) {
+	if p.encrypted {
+		return "", "", 0, false
+	}
+	// The client's first message has no type byte: it is a length and a protocol version.
+	if p.client && !p.started {
+		if len(buf) < 8 {
+			return "", "", 0, true
+		}
+		m := int(be32(buf))
+		if m < 8 || m > 10000 {
+			return "", "", 0, false // not a Postgres startup packet
+		}
+		if len(buf) < m {
+			return "", "", 0, true
+		}
+		text = p.startup(buf[:m])
+		if strings.HasPrefix(text, "SSLRequest") {
+			p.encrypted = true
+		}
+		return text, firstToken(text), m, true
+	}
+	if len(buf) < 5 {
+		return "", "", 0, true
+	}
+	m := int(be32(buf[1:])) + 1
+	if m < 5 {
+		return "", "", 0, false
+	}
+	if len(buf) < m {
+		return "", "", 0, true
+	}
+	text = p.render(buf[0], buf[5:m])
+	p.started = true
+	return text, firstToken(text), m, true
+}
+
+// holdable marks the messages worth pausing for a verdict: the ones that carry intent. Every
+// low-level acknowledgement and every result row is let through, or a single query would bury the
+// queue under dozens of holds.
+func (p *pg) holdable(kind string) bool {
+	if p.client {
+		switch kind {
+		case "Query", "Parse", "Bind", "Execute":
+			return true
+		}
+		return false
+	}
+	switch kind {
+	case "ErrorResponse", "DataRow":
+		return true
+	}
+	return false
 }
 
 // startup renders the first client message, which also says whether the rest of this connection
@@ -451,4 +514,179 @@ func pgDataRow(payload []byte) string {
 		return fmt.Sprintf("DataRow (%d columns)", n)
 	}
 	return "DataRow " + clip(strings.Join(vals, ", "), 120)
+}
+
+// --- Response synthesis: answering a held request locally, as the server would ---
+//
+// Terminating a request inside ntcept means the application must still see a well-formed reply, or
+// its driver hangs or desyncs. For a simple Query that is an ErrorResponse followed by
+// ReadyForQuery. For the extended protocol (Parse/Bind/Execute) the backend emits ErrorResponse
+// and then ignores everything until the client's Sync, which it answers with ReadyForQuery — so
+// respond there is a two-step exchange the relay drives via the terminator hooks below.
+
+// pgSynthError builds the bytes that answer a held client message of kind `kind` with an error.
+// awaitSync is true when the caller must keep swallowing client messages until a Sync (the
+// extended protocol), false when the reply is already complete (a simple Query).
+func pgSynthError(kind string, e ProtoError) (reply []byte, awaitSync bool) {
+	er := pgErrorResponse(e)
+	switch kind {
+	case "Query":
+		return append(er, pgReadyForQuery()...), false
+	case "Parse", "Bind", "Execute", "Describe":
+		return er, true
+	}
+	// Some other message was held; the safest complete answer is still error + ready.
+	return append(er, pgReadyForQuery()...), false
+}
+
+// pgErrorResponse encodes an ErrorResponse ('E') message: a run of type-tagged, NUL-terminated
+// fields ended by a zero byte. Severity, SQLSTATE and message are the ones a client acts on.
+func pgErrorResponse(e ProtoError) []byte {
+	severity := e.Severity
+	if severity == "" {
+		severity = "ERROR"
+	}
+	code := e.Code
+	if code == "" {
+		code = "P0001" // raise_exception: a generic, valid SQLSTATE
+	}
+	msg := e.Message
+	if msg == "" {
+		msg = "request rejected by ntcept"
+	}
+	var fields []byte
+	add := func(tag byte, v string) {
+		fields = append(fields, tag)
+		fields = append(fields, v...)
+		fields = append(fields, 0)
+	}
+	add('S', severity) // localized severity
+	add('V', severity) // non-localized severity (protocol 3.0+)
+	add('C', code)
+	add('M', msg)
+	fields = append(fields, 0) // terminator
+	return pgMessage('E', fields)
+}
+
+// pgReadyForQuery encodes ReadyForQuery ('Z') reporting an idle transaction, which returns the
+// client's state machine to "ready for the next command".
+func pgReadyForQuery() []byte { return pgMessage('Z', []byte{'I'}) }
+
+// pgMessage frames a backend message: a type byte, a big-endian int32 length that counts itself
+// but not the type byte, then the payload.
+func pgMessage(typ byte, payload []byte) []byte {
+	out := make([]byte, 5+len(payload))
+	out[0] = typ
+	n := uint32(4 + len(payload))
+	out[1], out[2], out[3], out[4] = byte(n>>24), byte(n>>16), byte(n>>8), byte(n)
+	copy(out[5:], payload)
+	return out
+}
+
+// --- Editing a held query by its SQL, rather than by its wire bytes ---
+//
+// A Query or Parse message is mostly a length-prefixed frame around the statement text, so editing
+// the raw bytes by hand means recomputing the length and, for Parse, stepping over the statement
+// name and parameter type list. These do that, so an operator can change the SQL and nothing else.
+
+// pgQueryText returns the SQL carried by a held Query or Parse message, or "" if the message is
+// neither (there is no single statement to show for a Bind or an Execute).
+func pgQueryText(kind string, msg []byte) string {
+	if len(msg) < 5 {
+		return ""
+	}
+	payload := msg[5:]
+	switch kind {
+	case "Query":
+		return trimZero(payload)
+	case "Parse":
+		_, rest, ok := cstring(payload) // statement name
+		if !ok {
+			return ""
+		}
+		if q, _, ok := cstring(rest); ok {
+			return q
+		}
+	}
+	return ""
+}
+
+// pgRewriteQuery rebuilds a Query or Parse message around new SQL, preserving a Parse's statement
+// name and parameter-type list so the Bind that follows still lines up. ok is false for any other
+// message, which has no single statement to rewrite.
+func pgRewriteQuery(kind string, msg []byte, sql string) (out []byte, ok bool) {
+	switch kind {
+	case "Query":
+		return pgMessage('Q', append([]byte(sql), 0)), true
+	case "Parse":
+		if len(msg) < 5 {
+			return nil, false
+		}
+		name, rest, ok := cstring(msg[5:])
+		if !ok {
+			return nil, false
+		}
+		_, tail, ok := cstring(rest) // skip the old query; keep the parameter-type list after it
+		if !ok {
+			return nil, false
+		}
+		payload := append([]byte(name), 0)
+		payload = append(payload, []byte(sql)...)
+		payload = append(payload, 0)
+		payload = append(payload, tail...)
+		return pgMessage('P', payload), true
+	}
+	return nil, false
+}
+
+// --- Editing a returned row ---
+//
+// A DataRow is a column count followed by, for each column, a length and its bytes (length -1 means
+// SQL NULL). Results come back in text format unless the client asked for binary in its Bind, which
+// the common drivers do not, so a column's bytes are the value as text — editable as such.
+
+// pgRowValues reads a DataRow's column values, using a nil entry for SQL NULL. ok is false for any
+// other message.
+func pgRowValues(kind string, msg []byte) (vals []*string, ok bool) {
+	if kind != "DataRow" || len(msg) < 7 {
+		return nil, false
+	}
+	rest := msg[5:]
+	n := int(be16(rest))
+	rest = rest[2:]
+	vals = make([]*string, 0, n)
+	for i := 0; i < n && len(rest) >= 4; i++ {
+		size := int(int32(be32(rest)))
+		rest = rest[4:]
+		if size < 0 {
+			vals = append(vals, nil)
+			continue
+		}
+		if len(rest) < size {
+			return nil, false
+		}
+		s := string(rest[:size])
+		vals = append(vals, &s)
+		rest = rest[size:]
+	}
+	return vals, true
+}
+
+// pgRewriteRow rebuilds a DataRow from edited column values, a nil entry meaning SQL NULL.
+func pgRewriteRow(kind string, vals []*string) (out []byte, ok bool) {
+	if kind != "DataRow" {
+		return nil, false
+	}
+	payload := make([]byte, 2)
+	payload[0], payload[1] = byte(len(vals)>>8), byte(len(vals))
+	for _, v := range vals {
+		if v == nil {
+			payload = append(payload, 0xff, 0xff, 0xff, 0xff) // -1: NULL
+			continue
+		}
+		n := uint32(len(*v))
+		payload = append(payload, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+		payload = append(payload, *v...)
+	}
+	return pgMessage('D', payload), true
 }

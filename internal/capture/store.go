@@ -84,6 +84,18 @@ func (s *Store) Append(f *Flow, m Message) {
 	s.Touch(f, EventFlowUpdate, func(f *Flow) { f.Messages = append(f.Messages, m) })
 }
 
+// OverrideLastMessage replaces the stored, human-readable copy of the most recent message, so a
+// script can redact what lands in the capture buffer while the real bytes still go on the wire. The
+// raw copy is dropped, since the redacted rendering is now the record.
+func (s *Store) OverrideLastMessage(f *Flow, decoded string) {
+	s.Touch(f, EventFlowUpdate, func(f *Flow) {
+		if n := len(f.Messages); n > 0 {
+			f.Messages[n-1].Decoded = decoded
+			f.Messages[n-1].Data = nil
+		}
+	})
+}
+
 func (s *Store) evict() {
 	for s.bytes > s.maxBytes && len(s.items) > 1 {
 		old := s.items[0]

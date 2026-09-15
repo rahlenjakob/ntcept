@@ -14,6 +14,7 @@ import (
 	"github.com/rahlenjakob/ntcept/internal/capture"
 	"github.com/rahlenjakob/ntcept/internal/control"
 	"github.com/rahlenjakob/ntcept/internal/proxy"
+	"github.com/rahlenjakob/ntcept/internal/script"
 )
 
 type Options struct {
@@ -24,6 +25,8 @@ type Options struct {
 	Args        []string // the command to launch; empty means serve and wait
 	Name        string   // session name; empty derives one from the command
 	Keep        bool     // stay up after the child exits
+	Script      string   // path to a Python interception script to load at start (optional)
+	Watch       bool     // auto-reload the script when its file changes
 	Out         io.Writer
 }
 
@@ -46,6 +49,26 @@ func Start(opts Options) (*Runtime, error) {
 	}
 	store := capture.NewStore(opts.BufferMB<<20, opts.MaxBodyKB<<10)
 	px := proxy.New(store, authority)
+
+	// Scripting is optional and lazy: create the engine when python is available so `ntcept script
+	// load` works later, and load the --script now if one was given (a failure there is fatal, since
+	// the user asked for it). Absent python, the engine stays nil and scripting reports unavailable.
+	if opts.Script != "" {
+		eng, err := script.New()
+		if err != nil {
+			return nil, fmt.Errorf("scripting: %w", err)
+		}
+		if err := eng.Load(opts.Script); err != nil {
+			eng.Stop()
+			return nil, fmt.Errorf("scripting: %w", err)
+		}
+		if opts.Watch {
+			eng.SetWatch(true)
+		}
+		px.Script = eng
+	} else if eng, err := script.New(); err == nil {
+		px.Script = eng
+	}
 
 	proxyLn, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(opts.ProxyPort)))
 	if err != nil {
@@ -94,6 +117,9 @@ func Start(opts Options) (*Runtime, error) {
 func (rt *Runtime) Stop() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	if rt.Proxy != nil && rt.Proxy.Script != nil {
+		rt.Proxy.Script.Stop()
+	}
 	_ = rt.httpSrv.Shutdown(ctx)
 	_ = rt.proxyLn.Close()
 	RemoveSession(rt.Session.Name)

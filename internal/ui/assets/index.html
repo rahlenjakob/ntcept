@@ -73,6 +73,7 @@ textarea.hdr{height:120px} textarea.bdy{height:170px}
 <header>
   <span class="brand"><span class="dot" id="live"></span>ntcept</span>
   <span class="meta" id="status">connecting…</span>
+  <span class="tag" id="scriptpill" hidden></span>
   <input type="search" id="q" placeholder="filter: host, path, method, status, or /regex/ over bodies">
   <button id="kindall" class="on" data-kind="">all</button>
   <button data-kind="http">http</button>
@@ -102,6 +103,30 @@ textarea.hdr{height:120px} textarea.bdy{height:170px}
       <label>status</label><input class="line" id="ed-status">
       <label>response headers</label><textarea class="hdr" id="ed-res-headers"></textarea>
       <label>response body</label><textarea class="bdy" id="ed-res-body"></textarea>
+    </section>
+    <section id="sec-db" hidden>
+      <label>decoded message</label>
+      <pre id="db-info"></pre>
+      <div id="db-edit">
+        <div id="db-sql-wrap">
+          <label>sql — edit and forward; the message is rebuilt around it</label>
+          <textarea class="bdy" id="db-sql"></textarea>
+        </div>
+        <div id="db-row-wrap" hidden>
+          <label>returned row — edit a value and forward; leave a null column blank to keep it null</label>
+          <div id="db-row"></div>
+        </div>
+        <div id="db-raw-wrap">
+          <label>raw bytes (advanced — used when there is no statement or row to edit)</label>
+          <textarea class="bdy" id="db-raw"></textarea>
+        </div>
+      </div>
+      <div id="db-respond" hidden>
+        <label>SQLSTATE — the five-character Postgres error code</label>
+        <input class="line" id="db-code" placeholder="40001">
+        <label>error message</label>
+        <input class="line" id="db-msg" placeholder="rejected by ntcept">
+      </div>
     </section>
     <p class="hint" id="ed-hint"></p>
   </div>
@@ -196,7 +221,28 @@ async function detail(id){
     h += `<h2>messages (${f.messages.length})</h2>` + f.messages.map(m =>
       `<div class="msg"><span class="dir">${m.dir==="in"?"←":"→"}</span><span class="body">${esc(m.decoded || m.data || "("+m.size+" bytes)")}</span></div>`).join("");
   }
+  if (f.script_log?.length){
+    h += `<h2>script log (${f.script_log.length})</h2>` + f.script_log.map(l =>
+      `<div class="msg"><span class="body">${esc(l)}</span></div>`).join("");
+  }
   $("#detail").innerHTML = h;
+}
+
+// reflectScript shows that a policy script is in control and disables the manual hold toggles it
+// would otherwise override.
+function reflectScript(sc){
+  const scripted = !!(sc && sc.loaded);
+  ["#holdreq", "#holdres"].forEach(id => {
+    const b = $(id);
+    if (!b) return;
+    b.disabled = scripted;
+    b.title = scripted ? "a script is in control — manual holds are disabled" : b.dataset.t || b.title;
+  });
+  const pill = $("#scriptpill");
+  if (pill){
+    pill.hidden = !scripted;
+    if (scripted) pill.textContent = "script: " + (sc.path ? sc.path.split("/").pop() : "on");
+  }
 }
 
 function pretty(s){
@@ -242,12 +288,24 @@ const BTN = {
   edit:     '<button data-v="edit">forward with edits</button>',
   compose:  '<button data-v="compose">answer locally…</button>',
   send:     '<button data-v="respond" class="primary">send this reply</button>',
-  back:     '<button data-v="back">back to the request</button>',
+  errdb:    '<button data-v="compose">answer with an error…</button>',
+  senderr:  '<button data-v="respond" class="primary">send this error</button>',
+  back:     '<button data-v="back">back to the message</button>',
   drop:     '<button data-v="drop" class="danger">drop</button>',
   close:    '<span style="flex:1"></span><button data-v="close">leave held</button>',
 };
 
 function renderActions(){
+  // A database/TCP message is held as one wire message, not an HTTP request/response pair.
+  if (current.kind === "tcp"){
+    const isReq = current.dir === "out";
+    const canRespond = isReq && current.proto === "postgres";
+    const set = composing ? [BTN.senderr, BTN.back, BTN.drop]
+              : isReq     ? [BTN.forward, BTN.edit, canRespond ? BTN.errdb : "", BTN.drop]
+                          : [BTN.forward, BTN.edit, BTN.drop];
+    $("#ed-actions").innerHTML = set.filter(Boolean).join("") + BTN.close;
+    return;
+  }
   const isReq = current.stage === "request";
   const set = composing ? [BTN.send, BTN.back, BTN.drop]
             : isReq     ? [BTN.forward, BTN.edit, BTN.compose, BTN.drop]
@@ -257,6 +315,44 @@ function renderActions(){
 
 function openEditor(h){
   current = h; composing = false;
+
+  // A database/TCP message: show the decode, an editable statement where there is one, and the raw
+  // bytes as a fallback.
+  if (h.kind === "tcp"){
+    const isReq = h.dir === "out";
+    $("#ed-title").textContent = `held ${h.proto || "tcp"} ${isReq ? "request" : "response"}`;
+    $("#ed-sub").textContent = h.msg_kind || h.host;
+    $("#sec-sent").hidden = true;
+    $("#sec-req").hidden = true;
+    $("#sec-res").hidden = true;
+    $("#sec-db").hidden = false;
+    $("#db-info").textContent = h.text || "";
+    $("#db-edit").hidden = false;
+    $("#db-respond").hidden = true;
+    const isRow = Array.isArray(h.row);
+    $("#db-sql-wrap").hidden = !h.sql || isRow;
+    $("#db-sql").value = h.sql || "";
+    $("#db-row-wrap").hidden = !isRow;
+    if (isRow){
+      $("#db-row").innerHTML = h.row.map((v, i) =>
+        `<label>column ${i + 1}${v === null ? " · null" : ""}</label>` +
+        `<input class="line" data-col="${i}" data-null="${v === null ? 1 : 0}" value="${esc(v ?? "")}">`
+      ).join("");
+    }
+    // Raw-byte editing is the fallback for messages with no statement or row to edit.
+    $("#db-raw-wrap").hidden = isRow || !!h.sql;
+    $("#db-raw").value = h.raw || "";
+    $("#ed-hint").textContent = isReq
+      ? "Edit the statement and forward it, answer it locally with an error, or drop the connection."
+      : isRow
+        ? "Edit a returned value and forward it — the application sees the row you send."
+        : "The application has not seen this message yet.";
+    $("#editor").hidden = false;
+    renderActions();
+    return;
+  }
+  $("#sec-db").hidden = true;
+
   const isReq = h.stage === "request";
   $("#ed-title").textContent = `held ${h.stage}`;
   $("#ed-sub").textContent = isReq ? h.host : `${h.status} from ${h.host}`;
@@ -288,6 +384,14 @@ function openEditor(h){
 
 function startComposing(){
   composing = true;
+  if (current.kind === "tcp"){
+    $("#db-edit").hidden = true;
+    $("#db-respond").hidden = false;
+    $("#ed-hint").textContent =
+      "This error is sent to the application; the request never reaches " + current.host + ".";
+    renderActions();
+    return;
+  }
   $("#sec-req").hidden = true;
   $("#sec-res").hidden = false;
   $("#ed-hint").textContent =
@@ -299,7 +403,31 @@ function closeEditor(){ $("#editor").hidden = true; current = null; composing = 
 
 async function verdict(action){
   if (!current) return;
-  const h = current, isReq = h.stage === "request";
+  const h = current;
+
+  // Database/TCP verdicts speak in messages: rewrite the statement (or raw bytes) on an edit, and
+  // answer a Postgres request with an error on a respond.
+  if (h.kind === "tcp"){
+    const body = {action};
+    if (action === "edit"){
+      if (Array.isArray(h.row)){
+        const inputs = [...$("#db-row").querySelectorAll("input[data-col]")];
+        body.row = inputs.map(inp =>
+          (inp.dataset.null === "1" && inp.value === "") ? null : inp.value);
+      } else if (!$("#db-sql-wrap").hidden && $("#db-sql").value !== (h.sql || "")){
+        body.sql = $("#db-sql").value;
+      } else {
+        const raw = $("#db-raw").value;
+        if (raw !== (h.raw || "")) body.raw = raw;
+      }
+    } else if (action === "respond"){
+      body.error = {code: $("#db-code").value.trim(), message: $("#db-msg").value.trim()};
+    }
+    await submitVerdict(h.id, body);
+    return;
+  }
+
+  const isReq = h.stage === "request";
   const body = {action};
 
   if (action === "respond"){
@@ -324,7 +452,11 @@ async function verdict(action){
     }
   }
 
-  const res = await fetch("/queue/"+h.id, {method:"POST", body: JSON.stringify(body)});
+  await submitVerdict(h.id, body);
+}
+
+async function submitVerdict(id, body){
+  const res = await fetch("/queue/"+id, {method:"POST", body: JSON.stringify(body)});
   if (!res.ok){
     const e = await res.json().catch(() => ({}));
     $("#ed-hint").textContent = e.error || "that exchange is no longer held";
@@ -354,7 +486,10 @@ async function heldBar(){
   }
   bar.className = "held";
   const h = held[0];
-  bar.innerHTML = `<span>${held.length} held · ${esc(h.stage)} ${esc(h.method||"")} ${esc(h.url || h.host)}</span>
+  const what = h.kind === "tcp"
+    ? `${esc(h.proto || "tcp")} ${esc(h.msg_kind || "")} · ${esc(h.sql || h.text || h.host)}`
+    : `${esc(h.stage)} ${esc(h.method || "")} ${esc(h.url || h.host)}`;
+  bar.innerHTML = `<span>${held.length} held · ${what}</span>
     <button id="openheld">open</button>`;
   // A held exchange is blocking the application, so it is the only thing worth looking at.
   if (!current) openEditor(h);
@@ -379,6 +514,12 @@ async function boot(){
   $("#status").textContent = `proxy :${s.proxy_port} · ${s.command ? s.command.slice(0,60) : "no command"}`;
   $("#holdreq").classList.toggle("on", !!st.hold_requests);
   $("#holdres").classList.toggle("on", !!st.hold_responses);
+  reflectScript(st.script);
+  // A script can be loaded or removed by an agent while the inspector is open, so keep the manual
+  // controls in step with it.
+  setInterval(async () => {
+    try { const s = await (await fetch("/status")).json(); reflectScript(s.script); } catch {}
+  }, 3000);
   const {flows:list} = await (await fetch("/flows")).json();
   list.forEach(f => flows.set(f.id, f));
   render(); heldBar();

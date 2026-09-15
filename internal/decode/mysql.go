@@ -43,22 +43,66 @@ var mysqlCmds = map[byte]string{
 func (m *mysql) Feed(b []byte) []string {
 	m.buf = append(m.buf, b...)
 	var out []string
-	for len(m.buf) >= 4 {
-		n := int(m.buf[0]) | int(m.buf[1])<<8 | int(m.buf[2])<<16
-		if len(m.buf) < 4+n {
+	for {
+		text, _, n, _ := m.parseOne(m.buf)
+		if n == 0 {
 			break
 		}
-		seq := m.buf[3]
-		body := m.buf[4 : 4+n]
-		if s := m.render(seq, body); s != "" {
-			out = append(out, s)
+		m.buf = m.buf[n:]
+		if text != "" {
+			out = append(out, text)
 		}
-		m.buf = m.buf[4+n:]
 	}
 	if len(m.buf) > 4<<20 {
 		m.buf = nil
 	}
 	return out
+}
+
+// Frame parses complete MySQL packets from the front of buf, which the caller owns, so a command or
+// an error can be held on its way through.
+func (m *mysql) Frame(buf []byte) (frames []Frame, consumed int, ok bool) {
+	for {
+		text, kind, n, good := m.parseOne(buf[consumed:])
+		if !good {
+			return frames, consumed, false
+		}
+		if n == 0 {
+			return frames, consumed, true
+		}
+		frames = append(frames, Frame{
+			Bytes: buf[consumed : consumed+n], Text: text, Kind: kind, Holdable: m.holdable(kind),
+		})
+		consumed += n
+	}
+}
+
+// parseOne reads one MySQL packet from the front of buf, advancing shared prepared-statement state.
+// It is byte-stateless; the buffer belongs to the caller.
+func (m *mysql) parseOne(buf []byte) (text, kind string, n int, ok bool) {
+	if len(buf) < 4 {
+		return "", "", 0, true
+	}
+	ln := int(buf[0]) | int(buf[1])<<8 | int(buf[2])<<16
+	total := 4 + ln
+	if len(buf) < total {
+		return "", "", 0, true
+	}
+	text = m.render(buf[3], buf[4:total])
+	return text, firstToken(text), total, true
+}
+
+// holdable pauses a client command or a server error, and lets acknowledgements and result rows
+// through.
+func (m *mysql) holdable(kind string) bool {
+	if m.client {
+		switch kind {
+		case "Query", "Prepare", "StmtExecute", "InitDB":
+			return true
+		}
+		return false
+	}
+	return kind == "Error"
 }
 
 func (m *mysql) render(seq byte, body []byte) string {

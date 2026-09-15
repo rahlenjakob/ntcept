@@ -14,6 +14,108 @@ type Stream interface {
 	Feed(b []byte) []string
 }
 
+// Frame is one complete protocol message located in a byte stream. Bytes are the exact wire bytes
+// of the message — a sub-slice of the buffer passed to Frame, valid only until the next call, so a
+// caller that keeps them past that (to park or replay) must copy first.
+type Frame struct {
+	Bytes    []byte
+	Text     string // the rendered display, identical to what Feed produces for this message
+	Kind     string // the message-type label, e.g. "Query", "Bind", "ErrorResponse"
+	Holdable bool   // whether this message carries intent worth pausing for a verdict
+}
+
+// Framer is a decoder that can locate message boundaries, so the relay can hold, drop, edit or
+// answer individual messages rather than only watch them. Not every stream can be framed — the raw
+// fallback cannot, and a decodable stream stops being one the moment it upgrades to TLS.
+type Framer interface {
+	// Frame parses complete messages from the front of buf. The caller owns buf and retains
+	// whatever is left after `consumed`. ok is false once the stream is no longer decodable (a
+	// TLS upgrade, or a desync): the frames and consumed up to that point are still valid, and
+	// the caller must pass everything after them through untouched.
+	Frame(buf []byte) (frames []Frame, consumed int, ok bool)
+}
+
+// ProtoError is a synthetic error used to answer a held database request locally, instead of
+// letting it reach the server. The fields are protocol-shaped: Code is a SQLSTATE for Postgres.
+type ProtoError struct {
+	Code     string
+	Message  string
+	Severity string
+}
+
+// SynthError builds the wire bytes that answer a held client message of kind `kind` with an error,
+// so the application's driver sees a real protocol error and the request never reaches the server.
+// awaitTerminator is true when answering is a multi-step exchange (the Postgres extended protocol):
+// the caller must then swallow client messages until ExchangeTerminator reports one, and send
+// TerminatorReply in response. reply is nil when this protocol cannot be answered this way.
+func SynthError(proto, kind string, e ProtoError) (reply []byte, awaitTerminator bool) {
+	switch proto {
+	case "postgres":
+		return pgSynthError(kind, e)
+	}
+	return nil, false
+}
+
+// ExchangeTerminator reports whether a message of this kind ends a request exchange that SynthError
+// left open — the Postgres client's Sync. It is only meaningful when SynthError returned
+// awaitTerminator.
+func ExchangeTerminator(proto, kind string) bool {
+	return proto == "postgres" && kind == "Sync"
+}
+
+// TerminatorReply is what to send the client once ExchangeTerminator is seen: Postgres ReadyForQuery.
+func TerminatorReply(proto string) []byte {
+	if proto == "postgres" {
+		return pgReadyForQuery()
+	}
+	return nil
+}
+
+// QueryText returns the SQL a held message carries, or "" if it carries no single statement (a
+// Bind or an Execute), so a UI can offer the statement for editing rather than the raw wire bytes.
+func QueryText(proto, kind string, msg []byte) string {
+	if proto == "postgres" {
+		return pgQueryText(kind, msg)
+	}
+	return ""
+}
+
+// RewriteQuery rebuilds a held message around new SQL, keeping everything else about it intact. ok
+// is false when the protocol or message has no single statement to rewrite, and the caller should
+// fall back to replacing the raw bytes.
+func RewriteQuery(proto, kind string, msg []byte, sql string) (out []byte, ok bool) {
+	if proto == "postgres" {
+		return pgRewriteQuery(kind, msg, sql)
+	}
+	return nil, false
+}
+
+// RowValues returns a held result row's column values (nil for SQL NULL), so a UI can offer each
+// column for editing. ok is false when the message is not a row this protocol can pick apart.
+func RowValues(proto, kind string, msg []byte) (vals []*string, ok bool) {
+	if proto == "postgres" {
+		return pgRowValues(kind, msg)
+	}
+	return nil, false
+}
+
+// RewriteRow rebuilds a result row from edited column values, a nil entry meaning SQL NULL.
+func RewriteRow(proto, kind string, msg []byte, vals []*string) (out []byte, ok bool) {
+	if proto == "postgres" {
+		return pgRewriteRow(kind, vals)
+	}
+	return nil, false
+}
+
+// firstToken is the leading word of a rendered message, which the decoders make the message-type
+// name ("Query select …" -> "Query"). It is what classifies a frame for holding and display.
+func firstToken(s string) string {
+	if i := strings.IndexByte(s, ' '); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
 // Codec decodes both directions of one connection.
 //
 // Which protocol it is may not be known when the connection opens: MySQL's server speaks first,
