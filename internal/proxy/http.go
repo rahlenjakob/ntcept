@@ -274,7 +274,9 @@ func (s *Server) readRequestBody(r *http.Request) ([]byte, io.ReadCloser, error)
 	if r.Body == nil {
 		return nil, nil, nil
 	}
-	if s.HoldRequests.Load() {
+	// A loaded script judges the request with its body, and may answer it without it ever being
+	// streamed upstream: buffer it, as a hold does.
+	if s.HoldRequests.Load() || s.Script.Enabled() {
 		b, err := io.ReadAll(io.LimitReader(r.Body, maxHoldBody))
 		if err != nil {
 			return nil, nil, err

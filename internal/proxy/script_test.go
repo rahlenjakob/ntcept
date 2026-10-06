@@ -2,7 +2,11 @@ package proxy
 
 import (
 	"bytes"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +17,12 @@ import (
 // loadScript attaches a scripting engine running src to the harness's server, skipping if python3
 // is absent.
 func (h *dbHarness) loadScript(t *testing.T, src string) {
+	t.Helper()
+	h.srv.Script = startScript(t, src)
+}
+
+// startScript runs src in a new scripting engine, skipping if python3 is absent.
+func startScript(t *testing.T, src string) *script.Engine {
 	t.Helper()
 	e, err := script.New()
 	if err != nil {
@@ -29,7 +39,7 @@ func (h *dbHarness) loadScript(t *testing.T, src string) {
 	if err := e.Load(path); err != nil {
 		t.Fatal(err)
 	}
-	h.srv.Script = e
+	return e
 }
 
 // TestScriptRespondsToQuery: a rule answers a SELECT with an error, and it reaches the app while the
@@ -147,5 +157,53 @@ def on_response(m):
 				t.Fatalf("the secret leaked into the stored copy: %q", m.Decoded)
 			}
 		}
+	}
+}
+
+// TestScriptSeesTheHTTPRequestBody: a rule decides on the request body, so the body must be
+// buffered for it rather than streamed past it. A matching body is answered locally and never
+// reaches the upstream; any other body still arrives intact.
+func TestScriptSeesTheHTTPRequestBody(t *testing.T) {
+	received := make(chan string, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		received <- string(b)
+		_, _ = io.WriteString(w, "upstream")
+	}))
+	defer upstream.Close()
+
+	h := newHarness(t, nil)
+	h.srv.Script = startScript(t, `
+def on_request(m):
+    if m.kind == "http" and "drop-table" in m.body:
+        return respond(status=403, body="refused by policy")
+`)
+
+	res, err := h.client().Post(upstream.URL+"/run", "text/plain", strings.NewReader(`{"cmd":"drop-table"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != 403 || string(body) != "refused by policy" {
+		t.Fatalf("the rule never saw the body: got %d %q", res.StatusCode, body)
+	}
+	select {
+	case got := <-received:
+		t.Fatalf("a request the script answered still reached the upstream: %q", got)
+	default:
+	}
+
+	res, err = h.client().Post(upstream.URL+"/run", "text/plain", strings.NewReader(`{"cmd":"select"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(res.Body)
+	res.Body.Close()
+	if string(body) != "upstream" {
+		t.Fatalf("a non-matching request should be forwarded, got %d %q", res.StatusCode, body)
+	}
+	if got := <-received; got != `{"cmd":"select"}` {
+		t.Fatalf("buffering for the script changed the forwarded body: %q", got)
 	}
 }
